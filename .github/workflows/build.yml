@@ -1,3 +1,4 @@
+```yaml
 name: Build Nginx for Android
 
 on:
@@ -21,56 +22,53 @@ jobs:
 
       - name: Setup NDK
         run: |
-          cd /opt
-          sudo wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
-          sudo unzip -q android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
-          # 设置环境变量
-          echo "ANDROID_NDK_HOME=/opt/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+          # 建立工作目录，避免权限问题
+          mkdir -p $GITHUB_WORKSPACE/ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip -d $GITHUB_WORKSPACE/ndk
+          echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/ndk/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
 
       - name: Download Sources
         run: |
-          wget http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz && tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
+          wget http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}..tar.gz && tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
           wget https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${{ env.PCRE2_VERSION }}/pcre2-${{ env.PCRE2_VERSION }}.tar.gz && tar -xzf pcre2-${{ env.PCRE2_VERSION }}.tar.gz
           wget https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz && tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          # 修复 ZLIB 下载地址
           wget https://github.com/madler/zlib/releases/download/v${{ env.ZLIB_VERSION }}/zlib-${{ env.ZLIB_VERSION }}.tar.gz && tar -xzf zlib-${{ env.ZLIB_VERSION }}.tar.gz
 
       - name: Build Nginx
         run: |
-          # 1. 准备工具链路径
           export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
+          # 使用绝对路径定义编译器
+          export CROSS_CC=$TOOLCHAIN/bin/${{ env.TARGET_ARCH }}${{ env.API_LEVEL }}-clang
+          export CROSS_AR=$TOOLCHAIN/bin/llvm-ar
           
-          # 2. 定义交叉编译工具
-          # 在 NDK r25 中，推荐使用带 API level 的包装器
-          export CC=aarch64-linux-android${{ env.API_LEVEL }}-clang
-          export CXX=aarch64-linux-android${{ env.API_LEVEL }}-clang++
-          export AR=llvm-ar
-          export AS=llvm-as
-          export RANLIB=llvm-ranlib
-          export LD=ld.lld
-          export STRIP=llvm-strip
-
           cd nginx-${{ env.NGINX_VERSION }}
-
-          # 3. 【核心修复】打补丁以绕过 Nginx 的执行检查
-          # 修复 sizeof 检查
+          
+          # === 核心修复：对 Nginx 检查脚本打补丁 ===
+          
+          # 1. 修复编译器名称检测：强制认为我们在用 clang，不进行运行测试
+          sed -i 's/ngx_feature_run=yes/ngx_feature_run=no/g' auto/cc/name
+          echo "ngx_compiler=clang" > objs/ngx_compiler_name
+          
+          # 2. 修复 sizeof 检测：直接指定大小，不运行 autotest 程序
+          # 将所有的 ngx_size=`$NGX_AUTOTEST` 替换为固定值（64位系统通常是8）
           sed -i 's/ngx_size=`$NGX_AUTOTEST`/ngx_size=8/g' auto/types/sizeof
-          # 修复 feature 检查（防止 configure 尝试运行交叉编译的二进制文件）
+          
+          # 3. 修复 feature 检测：防止它尝试运行交叉编译出的 ARM 二进制文件
           sed -i 's/if \[ $ngx_rc -ne 0 \]; then/if [ $ngx_rc -eq 999 ]; then/' auto/feature
-          # 特殊修复：强制指定编译环境为 Linux (防止它识别不出系统)
-          sed -i 's/NGX_AUTOTEST=$NGX_OBJS\/autotest/NGX_AUTOTEST=$NGX_OBJS\/autotest.exe/g' auto/types/sizeof
 
-          # 4. 配置
+          # 4. 执行配置
           ./configure \
-            --with-cc=$CC \
-            --with-cpp=$CC \
-            --crossbuild=Linux:arm64 \
+            --with-cc=$CROSS_CC \
+            --with-cpp=$CROSS_CC \
+            --crossbuild=android-arm64 \
             --with-pcre=../pcre2-${{ env.PCRE2_VERSION }} \
             --with-openssl=../openssl-${{ env.OPENSSL_VERSION }} \
             --with-zlib=../zlib-${{ env.ZLIB_VERSION }} \
             --with-http_ssl_module \
             --with-http_v2_module \
-            --with-cc-opt="-DNGX_SYS_NERR=132 -I$TOOLCHAIN/sysroot/usr/include" \
+            --with-cc-opt="-I$TOOLCHAIN/sysroot/usr/include -DNGX_SYS_NERR=132" \
             --with-ld-opt="-fuse-ld=lld" \
             --prefix=/data/local/tmp/nginx \
             --conf-path=/data/local/tmp/nginx/nginx.conf \
@@ -79,7 +77,7 @@ jobs:
             --pid-path=/data/local/tmp/nginx/nginx.pid \
             --lock-path=/data/local/tmp/nginx/nginx.lock
 
-          # 5. 编译与安装
+          # 5. 编译
           make -j$(nproc)
           make install DESTDIR=$(pwd)/out
 
