@@ -1,4 +1,4 @@
-name: Build Nginx for Android
+name: Build Nginx for Android (arm64)
 
 on:
   push:
@@ -12,12 +12,13 @@ jobs:
     env:
       NGINX_VERSION: 1.25.5
       ANDROID_API: 21
+      NDK_VERSION: r26d
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y build-essential wget unzip
@@ -27,26 +28,32 @@ jobs:
           wget http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
           tar -xzf nginx-${NGINX_VERSION}.tar.gz
 
-      - name: Install Android NDK
+      - name: Download Android NDK
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-          unzip android-ndk-r26d-linux.zip
-          echo "NDK=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+          wget https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
+          unzip android-ndk-${NDK_VERSION}-linux.zip
+          echo "NDK=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
 
-      - name: Set toolchain
+      - name: Setup toolchain
         run: |
           echo "TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
-          echo "CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang" >> $GITHUB_ENV
+          echo "CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-linux-android21" >> $GITHUB_ENV
           echo "AR=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
+          echo "STRIP=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" >> $GITHUB_ENV
 
-      - name: Configure
+      - name: Debug toolchain (optional)
+        run: |
+          ls $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+
+      - name: Configure Nginx
         run: |
           cd nginx-${NGINX_VERSION}
           ./configure \
             --prefix=/data/local/tmp/nginx \
-            --with-cc=$CC \
-            --with-cc-opt="--sysroot=$TOOLCHAIN/sysroot" \
-            --with-ld-opt="--sysroot=$TOOLCHAIN/sysroot" \
+            --with-cc="$CC" \
+            --with-cc-opt="-fPIE -D__ANDROID_API__=21" \
+            --with-ld-opt="-fPIE -pie" \
+            --with-threads \
             --without-http_rewrite_module \
             --without-http_gzip_module
 
@@ -55,9 +62,9 @@ jobs:
           cd nginx-${NGINX_VERSION}
           make -j$(nproc)
 
-      - name: Strip
+      - name: Strip binary
         run: |
-          $TOOLCHAIN/bin/llvm-strip nginx-${NGINX_VERSION}/objs/nginx
+          $STRIP nginx-${NGINX_VERSION}/objs/nginx
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
