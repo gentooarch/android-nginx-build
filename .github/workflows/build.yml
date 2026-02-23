@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup NDK
         run: |
@@ -67,7 +67,7 @@ jobs:
           make install DESTDIR=$(pwd)/out
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: nginx-android-bin
           path: nginx-${{ env.NGINX_VERSION }}/out/data/local/tmp/nginx/
