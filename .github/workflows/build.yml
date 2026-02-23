@@ -1,69 +1,111 @@
-name: Build Nginx for Android
+name: Build Nginx for Android (Aarch64)
 
 on:
+  workflow_dispatch:  # 允许手动触发构建
   push:
-  workflow_dispatch:
-
-env:
-  NGINX_VERSION: 1.26.2
-  ANDROID_API: 21
-  ARCH: aarch64
+    tags:
+      - 'v*'          # 当推送 tag 时触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    env:
+      # 定义版本号，你可以根据需要修改
+      NGX_VER: 1.24.0
+      OPENSSL_VER: 1.1.1w 
+      PCRE_VER: 8.45
+      ZLIB_VER: 1.3
+      
+      # 编译器设置
+      CC: aarch64-linux-gnu-gcc
+      CXX: aarch64-linux-gnu-g++
 
     steps:
-      - name: Install build tools
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential wget unzip
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Download Android NDK
+      - name: Install Dependencies and Toolchain
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-          unzip android-ndk-r26d-linux.zip
-          echo "NDK_HOME=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make wget tar perl
 
-      - name: Download Nginx
+      - name: Download Source Code
         run: |
-          wget http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
-          tar -xzf nginx-${NGINX_VERSION}.tar.gz
+          # 下载 Nginx
+          wget http://nginx.org/download/nginx-${NGX_VER}.tar.gz
+          tar zxf nginx-${NGX_VER}.tar.gz
+          
+          # 下载 OpenSSL
+          wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+          tar zxf openssl-${OPENSSL_VER}.tar.gz
+          
+          # 下载 PCRE
+          wget https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VER}/pcre-${PCRE_VER}.tar.gz
+          tar zxf pcre-${PCRE_VER}.tar.gz
+          
+          # 下载 Zlib
+          wget https://zlib.net/zlib-${ZLIB_VER}.tar.gz
+          tar zxf zlib-${ZLIB_VER}.tar.gz
+
+      - name: Patch Nginx for OpenSSL Cross Compilation
+        run: |
+          cd nginx-${NGX_VER}
+          # Nginx 默认调用 ./config，交叉编译 OpenSSL 需要调用 ./Configure linux-aarch64
+          # 我们修改 Nginx 的构建脚本来适配
+          sed -i 's/.\/config/.\/Configure linux-aarch64/g' auto/lib/openssl/make
 
       - name: Configure and Build
         run: |
-          cd nginx-${NGINX_VERSION}
-
-          export TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/clang
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export STRIP=$TOOLCHAIN/bin/llvm-strip
-          export TARGET=aarch64-linux-android
-          export API=$ANDROID_API
-
-          export CFLAGS="--target=$TARGET$API -fPIC"
-          export LDFLAGS="--target=$TARGET$API -fPIE -pie"
-
+          cd nginx-${NGX_VER}
+          
+          # 关键步骤：配置 Nginx 进行交叉编译
+          # --with-cc-opt="-static" 强制静态链接
+          # --crossbuild 告诉 Nginx 我们是在交叉编译
+          
           ./configure \
-            --crossbuild=Linux::aarch64 \
-            --with-cc="$CC $CFLAGS" \
-            --with-ld-opt="$LDFLAGS" \
-            --with-cc-opt="$CFLAGS" \
+            --prefix=/data/local/tmp/nginx \
+            --user=nobody \
+            --group=nobody \
+            --with-cc=${CC} \
+            --with-cpp=aarch64-linux-gnu-cpp \
+            --with-pcre=../pcre-${PCRE_VER} \
+            --with-zlib=../zlib-${ZLIB_VER} \
+            --with-openssl=../openssl-${OPENSSL_VER} \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_gzip_static_module \
+            --crossbuild=Linux:aarch64 \
+            --with-cc-opt="-static -O2 -D_FILE_OFFSET_BITS=64" \
+            --with-ld-opt="-static" \
             --without-http_rewrite_module \
             --without-http_gzip_module \
-            --without-http_ssi_module \
-            --without-pcre \
-            --without-http_upstream_zone_module \
-            --without-select_module \
-            --without-poll_module \
-            --with-threads \
-            --prefix=$PWD/output
+            --with-pcre-jit
+            
+          # 注意：交叉编译时，configure 可能会因为无法运行测试程序而报错或跳过某些检测
+          # 我们需要手动指定一些通常由测试程序检测出的值（如果编译失败，可能需要取消下面几行的注释并调整）
+          # 但在新版 Nginx + Ubuntu 环境下，上述配置通常能自动识别大部分内容。
 
           make -j$(nproc)
 
-      - name: Upload artifact
+      - name: Verify Binary
+        run: |
+          cd nginx-${NGX_VER}/objs
+          file nginx
+          # 检查是否包含 statically linked
+          if file nginx | grep -q "statically linked"; then
+            echo "Build Success: Binary is statically linked"
+          else
+            echo "Build Failed: Binary is NOT statically linked"
+            exit 1
+          fi
+
+      - name: Rename and Prepare Artifact
+        run: |
+          mv nginx-${NGX_VER}/objs/nginx nginx-android-aarch64
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nginx-android
-          path: nginx-${{ env.NGINX_VERSION }}/objs/nginx
+          name: nginx-android-binary
+          path: nginx-android-aarch64
