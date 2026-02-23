@@ -1,23 +1,24 @@
 name: Build Nginx for Android (Aarch64)
 
 on:
-  workflow_dispatch:  # 允许手动触发构建
+  workflow_dispatch:
   push:
     tags:
-      - 'v*'          # 当推送 tag 时触发
+      - 'v*'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     env:
-      # 定义版本号，你可以根据需要修改
+      # === 版本更新 ===
       NGX_VER: 1.24.0
-      OPENSSL_VER: 1.1.1w 
+      # OpenSSL 升级到 3.x (1.1.1 已停止维护且链接容易失效)
+      OPENSSL_VER: 3.3.2
       PCRE_VER: 8.45
-      ZLIB_VER: 1.3
+      # Zlib 升级到 1.3.1
+      ZLIB_VER: 1.3.1
       
-      # 编译器设置
       CC: aarch64-linux-gnu-gcc
       CXX: aarch64-linux-gnu-g++
 
@@ -25,43 +26,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies and Toolchain
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make wget tar perl
 
       - name: Download Source Code
         run: |
-          # 下载 Nginx
-          wget http://nginx.org/download/nginx-${NGX_VER}.tar.gz
+          echo "Downloading Sources..."
+          
+          # Nginx
+          wget -q http://nginx.org/download/nginx-${NGX_VER}.tar.gz
           tar zxf nginx-${NGX_VER}.tar.gz
           
-          # 下载 OpenSSL
-          wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+          # OpenSSL (使用 3.x 新地址)
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz
           tar zxf openssl-${OPENSSL_VER}.tar.gz
           
-          # 下载 PCRE
-          wget https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VER}/pcre-${PCRE_VER}.tar.gz
+          # PCRE (SourceForge)
+          wget -q https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VER}/pcre-${PCRE_VER}.tar.gz/download -O pcre-${PCRE_VER}.tar.gz
           tar zxf pcre-${PCRE_VER}.tar.gz
           
-          # 下载 Zlib
-          wget https://zlib.net/zlib-${ZLIB_VER}.tar.gz
+          # Zlib (改用 GitHub Release，比官网 zlib.net 稳定)
+          wget -q https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz
           tar zxf zlib-${ZLIB_VER}.tar.gz
 
       - name: Patch Nginx for OpenSSL Cross Compilation
         run: |
           cd nginx-${NGX_VER}
-          # Nginx 默认调用 ./config，交叉编译 OpenSSL 需要调用 ./Configure linux-aarch64
-          # 我们修改 Nginx 的构建脚本来适配
+          # 修改 Nginx 对 OpenSSL 的编译调用
+          # OpenSSL 3.x 和 1.1.x 在交叉编译时都需要 ./Configure linux-aarch64
           sed -i 's/.\/config/.\/Configure linux-aarch64/g' auto/lib/openssl/make
 
       - name: Configure and Build
         run: |
           cd nginx-${NGX_VER}
-          
-          # 关键步骤：配置 Nginx 进行交叉编译
-          # --with-cc-opt="-static" 强制静态链接
-          # --crossbuild 告诉 Nginx 我们是在交叉编译
           
           ./configure \
             --prefix=/data/local/tmp/nginx \
@@ -76,23 +75,20 @@ jobs:
             --with-http_v2_module \
             --with-http_gzip_static_module \
             --crossbuild=Linux:aarch64 \
-            --with-cc-opt="-static -O2 -D_FILE_OFFSET_BITS=64" \
+            --with-cc-opt="-static -O2 -D_FILE_OFFSET_BITS=64 -Wno-error" \
             --with-ld-opt="-static" \
             --without-http_rewrite_module \
             --without-http_gzip_module \
             --with-pcre-jit
             
-          # 注意：交叉编译时，configure 可能会因为无法运行测试程序而报错或跳过某些检测
-          # 我们需要手动指定一些通常由测试程序检测出的值（如果编译失败，可能需要取消下面几行的注释并调整）
-          # 但在新版 Nginx + Ubuntu 环境下，上述配置通常能自动识别大部分内容。
-
+          # -Wno-error: 防止新版 GCC 因为小的警告停止编译
+          
           make -j$(nproc)
 
       - name: Verify Binary
         run: |
           cd nginx-${NGX_VER}/objs
           file nginx
-          # 检查是否包含 statically linked
           if file nginx | grep -q "statically linked"; then
             echo "Build Success: Binary is statically linked"
           else
@@ -100,7 +96,7 @@ jobs:
             exit 1
           fi
 
-      - name: Rename and Prepare Artifact
+      - name: Rename Artifact
         run: |
           mv nginx-${NGX_VER}/objs/nginx nginx-android-aarch64
 
