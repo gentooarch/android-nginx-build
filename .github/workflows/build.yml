@@ -11,7 +11,6 @@ jobs:
       NGINX_VERSION: 1.24.0
       OPENSSL_VERSION: 3.1.1
       PCRE2_VERSION: 10.42
-      # 更新 zlib 版本并使用更可靠的来源
       ZLIB_VERSION: 1.3.1
       TARGET_ARCH: aarch64-linux-android
       API_LEVEL: 24
@@ -25,6 +24,7 @@ jobs:
           cd /opt
           sudo wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
           sudo unzip -q android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+          # 设置环境变量
           echo "ANDROID_NDK_HOME=/opt/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
 
       - name: Download Sources
@@ -32,51 +32,54 @@ jobs:
           wget http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz && tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
           wget https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${{ env.PCRE2_VERSION }}/pcre2-${{ env.PCRE2_VERSION }}.tar.gz && tar -xzf pcre2-${{ env.PCRE2_VERSION }}.tar.gz
           wget https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz && tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
-          # 修复点：改用 github 镜像下载 zlib，避免 404
           wget https://github.com/madler/zlib/releases/download/v${{ env.ZLIB_VERSION }}/zlib-${{ env.ZLIB_VERSION }}.tar.gz && tar -xzf zlib-${{ env.ZLIB_VERSION }}.tar.gz
 
       - name: Build Nginx
         run: |
+          # 1. 准备工具链路径
           export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export SYSROOT=$TOOLCHAIN/sysroot
-          export CC=$TOOLCHAIN/bin/${{ env.TARGET_ARCH }}${{ env.API_LEVEL }}-clang
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export AS=$TOOLCHAIN/bin/${{ env.TARGET_ARCH }}${{ env.API_LEVEL }}-clang
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export LD=$TOOLCHAIN/bin/ld
-          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export PATH=$TOOLCHAIN/bin:$PATH
+          
+          # 2. 定义交叉编译工具
+          # 在 NDK r25 中，推荐使用带 API level 的包装器
+          export CC=aarch64-linux-android${{ env.API_LEVEL }}-clang
+          export CXX=aarch64-linux-android${{ env.API_LEVEL }}-clang++
+          export AR=llvm-ar
+          export AS=llvm-as
+          export RANLIB=llvm-ranlib
+          export LD=ld.lld
+          export STRIP=llvm-strip
 
           cd nginx-${{ env.NGINX_VERSION }}
-          
-          # 核心修复：Nginx 交叉编译补丁
-          # 1. 强制设置 sizeof 结果，防止 configure 运行测试程序
-          sed -i 's/ngx_size=`$NGX_AUTOTEST`/ngx_size=8/g' auto/types/sizeof
-          
-          # 2. 绕过特征检查 (ngx_autotest)
-          # Nginx 默认会尝试运行生成的二进制文件来检查系统特性，但在交叉编译环境下会报错
-          # 我们需要手动告诉它一些 Linux 的通用特性
-          sed -i 's/if \[ $ngx_rc -ne 0 \]; then/if [ $ngx_rc -eq 999 ]; then/' auto/feature
 
+          # 3. 【核心修复】打补丁以绕过 Nginx 的执行检查
+          # 修复 sizeof 检查
+          sed -i 's/ngx_size=`$NGX_AUTOTEST`/ngx_size=8/g' auto/types/sizeof
+          # 修复 feature 检查（防止 configure 尝试运行交叉编译的二进制文件）
+          sed -i 's/if \[ $ngx_rc -ne 0 \]; then/if [ $ngx_rc -eq 999 ]; then/' auto/feature
+          # 特殊修复：强制指定编译环境为 Linux (防止它识别不出系统)
+          sed -i 's/NGX_AUTOTEST=$NGX_OBJS\/autotest/NGX_AUTOTEST=$NGX_OBJS\/autotest.exe/g' auto/types/sizeof
+
+          # 4. 配置
           ./configure \
             --with-cc=$CC \
             --with-cpp=$CC \
-            --with-ld-opt="-static-symbols" \
-            --crossbuild=android-arm64 \
+            --crossbuild=Linux:arm64 \
             --with-pcre=../pcre2-${{ env.PCRE2_VERSION }} \
             --with-openssl=../openssl-${{ env.OPENSSL_VERSION }} \
             --with-zlib=../zlib-${{ env.ZLIB_VERSION }} \
             --with-http_ssl_module \
             --with-http_v2_module \
+            --with-cc-opt="-DNGX_SYS_NERR=132 -I$TOOLCHAIN/sysroot/usr/include" \
+            --with-ld-opt="-fuse-ld=lld" \
             --prefix=/data/local/tmp/nginx \
             --conf-path=/data/local/tmp/nginx/nginx.conf \
             --error-log-path=/data/local/tmp/nginx/logs/error.log \
             --http-log-path=/data/local/tmp/nginx/logs/access.log \
             --pid-path=/data/local/tmp/nginx/nginx.pid \
-            --lock-path=/data/local/tmp/nginx/nginx.lock \
-            --without-http_rewrite_module \
-            --without-http_gzip_module
+            --lock-path=/data/local/tmp/nginx/nginx.lock
 
-          # 针对某些 NDK 版本可能需要的特殊处理
+          # 5. 编译与安装
           make -j$(nproc)
           make install DESTDIR=$(pwd)/out
 
