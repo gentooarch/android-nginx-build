@@ -18,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y build-essential wget unzip
@@ -34,25 +34,25 @@ jobs:
           unzip android-ndk-${NDK_VERSION}-linux.zip
           echo "NDK=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
 
-      - name: Setup toolchain
+      - name: Setup Toolchain
         run: |
           echo "TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
-          echo "CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-linux-android21" >> $GITHUB_ENV
+          echo "CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" >> $GITHUB_ENV
           echo "AR=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
           echo "STRIP=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" >> $GITHUB_ENV
 
-      - name: Debug toolchain (optional)
-        run: |
-          ls $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-
-      - name: Configure Nginx
+      - name: Configure
         run: |
           cd nginx-${NGINX_VERSION}
+
+          export TARGET=aarch64-linux-android${ANDROID_API}
+
+          export CFLAGS="--target=$TARGET -D__ANDROID_API__=${ANDROID_API} -fPIE"
+          export LDFLAGS="--target=$TARGET -fPIE -pie"
+
           ./configure \
             --prefix=/data/local/tmp/nginx \
-            --with-cc="$CC" \
-            --with-cc-opt="-fPIE -D__ANDROID_API__=21" \
-            --with-ld-opt="-fPIE -pie" \
+            --with-cc=$CC \
             --with-threads \
             --without-http_rewrite_module \
             --without-http_gzip_module
@@ -62,7 +62,7 @@ jobs:
           cd nginx-${NGINX_VERSION}
           make -j$(nproc)
 
-      - name: Strip binary
+      - name: Strip
         run: |
           $STRIP nginx-${NGINX_VERSION}/objs/nginx
 
