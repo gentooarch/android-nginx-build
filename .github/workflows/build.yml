@@ -1,0 +1,73 @@
+name: Build Nginx for Android
+
+on:
+  workflow_dispatch: # 手动触发构建
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: r25c
+      NGINX_VERSION: 1.24.0
+      OPENSSL_VERSION: 3.1.1
+      PCRE2_VERSION: 10.42
+      ZLIB_VERSION: 1.2.13
+      TARGET_ARCH: aarch64-linux-android
+      API_LEVEL: 24
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup NDK
+        run: |
+          cd /opt
+          sudo wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+          sudo unzip -q android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+          echo "ANDROID_NDK_HOME=/opt/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Download Sources
+        run: |
+          wget http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz && tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
+          wget https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${{ env.PCRE2_VERSION }}/pcre2-${{ env.PCRE2_VERSION }}.tar.gz && tar -xzf pcre2-${{ env.PCRE2_VERSION }}.tar.gz
+          wget https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz && tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          wget https://zlib.net/zlib-${{ env.ZLIB_VERSION }}.tar.gz && tar -xzf zlib-${{ env.ZLIB_VERSION }}.tar.gz
+
+      - name: Build Nginx
+        run: |
+          export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          export CC=$TOOLCHAIN/bin/${{ env.TARGET_ARCH }}${{ env.API_LEVEL }}-clang
+          export LD=$TOOLCHAIN/bin/ld
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          
+          cd nginx-${{ env.NGINX_VERSION }}
+          
+          # 关键：Nginx 交叉编译需要欺骗 configure 检查
+          ./configure \
+            --with-cc=$CC \
+            --with-cpp=$CC \
+            --with-ld-opt="-static-symbols" \
+            --crossbuild=android-arm64 \
+            --with-pcre=../pcre2-${{ env.PCRE2_VERSION }} \
+            --with-openssl=../openssl-${{ env.OPENSSL_VERSION }} \
+            --with-zlib=../zlib-${{ env.ZLIB_VERSION }} \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --prefix=/data/local/tmp/nginx \
+            --conf-path=/data/local/tmp/nginx/nginx.conf \
+            --error-log-path=/data/local/tmp/nginx/logs/error.log \
+            --http-log-path=/data/local/tmp/nginx/logs/access.log \
+            --pid-path=/data/local/tmp/nginx/nginx.pid \
+            --lock-path=/data/local/tmp/nginx/nginx.lock
+
+          # 修正 Nginx 交叉编译中无法运行自检程序的 Bug
+          sed -i 's/ngx_size=`$NGX_AUTOTEST`/ngx_size=8/g' auto/types/sizeof
+          
+          make -j$(nproc)
+          make install DESTDIR=$(pwd)/out
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: nginx-android-bin
+          path: nginx-${{ env.NGINX_VERSION }}/out/data/local/tmp/nginx/
